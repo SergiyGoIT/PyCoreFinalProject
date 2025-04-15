@@ -6,7 +6,7 @@ import logging
 import textwrap
 from datetime import datetime, date
 from typing import List, Optional, Dict, Type, TypeVar, Generic, Any
-from collections import UserDict, deque, defaultdict
+from collections import UserDict, deque, defaultdict, Counter
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from colorama import Fore, Style, init
@@ -429,6 +429,11 @@ class AddressBook(BaseBook["Contact"]):
             contact_ids=[contact_id]
         )
 
+    def get_contact_ids(self) -> List[str]:
+        return [str(contact.id) for contact in self.data.values()]
+    def get_contact_names(self) -> List[str]:
+        return [contact.name for contact in self.data.values()]
+
 class Notebook(BaseBook["Note"]):
     entry_class = Note
     entry_type_name = "нотатку"
@@ -451,6 +456,37 @@ class Notebook(BaseBook["Note"]):
         """Повертає список нотаток, прив'язаних до контакту з даним ID."""
         return [note for note in self.data.values() if contact_id in note.contact_ids]
 
+    def get_unique_tags(self) -> List[str]:
+            tags = set()
+            for note in self.data.values():
+                tags.update(note.tags)
+            return list(tags)
+    
+    def get_note_ids(self) -> List[str]:
+        return [str(note.id) for note in self.data.values()]
+    
+    def get_common_words(self, min_length: int = 3, max_suggestions: int = 10) -> List[str]:
+        """
+        Повертає список найпоширеніших слів із тексту нотаток.
+        :param min_length: мінімальна довжина слова
+        :param max_suggestions: максимальна кількість пропозицій
+        :return: список слів
+        """
+        # Стоп-слова для виключення (можна розширити)
+        stop_words = {"і", "а", "на", "в", "з", "до", "що", "як", "це", "та", "для"}
+        # Збираємо всі слова
+        all_words = []
+        for note in self.data.values():
+            # Розбиваємо текст на слова, видаляємо пунктуацію
+            words = re.findall(r'\b\w+\b', note.text.lower())
+            # Фільтруємо за довжиною та стоп-словами
+            all_words.extend(word for word in words if len(word) >= min_length and word not in stop_words)
+        
+        # Рахуємо частоту слів
+        word_counts = Counter(all_words)
+        # Беремо найпоширеніші
+        common_words = [word for word, _ in word_counts.most_common(max_suggestions)]
+        return common_words
 # ------------------------------------------------------
 # Допоміжні функції
 # ------------------------------------------------------
@@ -777,9 +813,12 @@ def list_contacts(args: List[str], abook: AddressBook):
 
 @input_error
 def search_contact(args: List[str], abook: AddressBook):
-    if not args:
-        raise ValueError("Використання: search-contact <query>")
-    query = " ".join(args)
+    if args:
+        query = " ".join(args)
+    else:
+        query = input("Введіть пошуковий запит (name, phone, email, etc.): ").strip()
+        if not query:
+            raise ValueError("Запит не може бути порожнім.")
     results = abook.find(query)
     if not results:
         print(Fore.CYAN + "Нічого не знайдено." + Style.RESET_ALL)
@@ -842,10 +881,12 @@ def edit_contact(args: List[str], abook: AddressBook, nbook: Notebook):
 
 @input_error
 def delete_contact(args: List[str], abook: AddressBook, nbook: Notebook):
-    """delete-contact <id|name> — видаляє контакт (і пропонує, що робити з пов'язаними нотатками)."""
-    if not args:
-        raise ValueError("Введіть ID контакту чи ім'я для видалення:")
-    identifier = " ".join(args).strip()
+    if args:
+            identifier = " ".join(args).strip()
+    else:
+        identifier = input("Введіть ID чи ім'я контакту для видалення: ").strip()
+        if not identifier:
+            raise ValueError("Ідентифікатор не може бути порожнім.")
     if identifier.isdigit():
         id_val = int(identifier)
         try:
@@ -862,13 +903,20 @@ def delete_contact(args: List[str], abook: AddressBook, nbook: Notebook):
             print(Fore.YELLOW + f"Знайдено кілька контактів за ім'ям '{identifier}':" + Style.RESET_ALL)
             for c in matches:
                 print(f"  ID={c.id}: {c.name}")
-            print(Fore.CYAN + "Уточніть ID для видалення." + Style.RESET_ALL)
-            print("Використайте команду: delete-contact ID")
-            return
+            id_val = input("Уточніть ID для видалення: ").strip()
+            if not id_val.isdigit():
+                print(Fore.RED + "Невірний формат ID. Операція скасована." + Style.RESET_ALL)
+                return
+            id_val = int(id_val)
+            try:
+                contact = abook.find_by_id(id_val)
+            except KeyError:
+                print(Fore.RED + f"Контакт ID={id_val} не знайдено." + Style.RESET_ALL)
+                return
         else:
             contact = matches[0]
+            id_val = contact.id
 
-    id_val = contact.id
     # Перевірка нотаток
     linked_notes = nbook.find_by_contact_id(id_val)
     if linked_notes:
@@ -902,10 +950,10 @@ def upcoming_birthdays(args: List[str], abook: AddressBook):
     """birthdays [days=7] — контакти з ДН протягом вказаної кількості днів."""
     days = 7
     if args and args[0].startswith("days="):
-        try:
-            days = int(args[0].split("=", 1)[1])
-        except ValueError:
-            pass
+        days = int(args[0].split("=", 1)[1])
+    else:
+        days_input = input("Введіть кількість днів для пошуку ДН (за замовчуванням 7): ").strip()
+        days = int(days_input) if days_input.isdigit() else 7
     results = abook.get_upcoming_birthdays(days_ahead=days)
     if not results:
         print(Fore.CYAN + f"Немає Дня народження протягом {days} днів." + Style.RESET_ALL)
@@ -983,10 +1031,12 @@ def list_notes(args: List[str], nb: Notebook, abook: AddressBook = None):
 
 @input_error
 def search_note(args: List[str], nb: Notebook, abook: AddressBook):
-    """search-note <query> — пошук нотаток за текстом/тегами та контактами."""
-    if not args:
-        raise ValueError("Використання: search-note <query>")
-    query = " ".join(args).lower()
+    if args:
+        query = " ".join(args).lower()
+    else:
+        query = input("Введіть запит для пошуку (текст, тег або ім'я контакту): ").strip().lower()
+        if not query:
+            raise ValueError("Запит не може бути порожнім.")
     results = []
 
     # 1. Пошук за текстом і тегами
@@ -1029,17 +1079,7 @@ def search_note(args: List[str], nb: Notebook, abook: AddressBook):
 
 @input_error
 def edit_note(args: List[str], nb: Notebook, abook: AddressBook):
-    if not args:
-        id_val = int(input("Укажіть ID нотатки для редагування: ").strip())
-        note = nb.find_by_id(id_val)
-        new_text = input("Enter new text (ENTER=skip): ").strip()
-        if new_text:
-            note.text = new_text
-        new_tags = input("Введіть нові теги (через пробіл, ENTER=skip): ").strip()
-        if new_tags:
-            note.tags = [t.lstrip('#') for t in new_tags.split()]
-        print(Fore.GREEN + f"Note ID={id_val} updated." + Style.RESET_ALL)
-    else:
+    if args:
         id_val = int(args[0])
         changes = {}
         for chunk in args[1:]:
@@ -1053,16 +1093,41 @@ def edit_note(args: List[str], nb: Notebook, abook: AddressBook):
                     changes[key] = [int(x) for x in re.split(r"[,;\s]+", val) if x.isdigit()]
                 else:
                     changes[key] = val
-        nb.edit(id_val, **changes)
+    else:
+        id_val = input("Введіть ID нотатки для редагування: ").strip()
+        if not id_val.isdigit():
+            raise ValueError("ID має бути числом.")
+        id_val = int(id_val)
+        note = nb.find_by_id(id_val)
+        print(Fore.CYAN + f"Поточний текст нотатки: {note.text}" + Style.RESET_ALL)
+        new_text = input("Введіть новий текст нотатки (ENTER to skip): ").strip()
+        print(Fore.CYAN + f"Поточні теги: {', '.join(note.tags)}" + Style.RESET_ALL)
+        new_tags = input("Введіть нові теги (через пробіл, ENTER для пропуску): ").strip()
+        print(Fore.CYAN + f"Поточні ID контактів: {note.contact_ids}" + Style.RESET_ALL)
+        new_contact_ids = input("Введіть нові ID контактів (через кому, ENTER для пропуску): ").strip()
+
+        changes = {}
+        if new_text:
+            changes["text"] = new_text
+        if new_tags:
+            changes["tags"] = [t.lstrip('#') for t in new_tags.split()]
+        if new_contact_ids:
+            changes["contact_ids"] = [int(x) for x in new_contact_ids.split(",") if x.strip().isdigit()]
+
+    nb.edit(id_val, **changes)
+    print(Fore.GREEN + f"Нотатка ID={id_val} оновлена." + Style.RESET_ALL)
 
     save_all(abook, nb)
 
 @input_error
 def delete_note(args: List[str], nb: Notebook, abook: AddressBook):
-    """delete-note <id> — видаляє нотатку за ID."""
-    if not args:
-        raise ValueError("Використання: delete-note <id>")
-    id_val = int(args[0])
+    if args:
+        id_val = int(args[0])
+    else:
+        id_input = input("Введіть ID нотатки для видалення: ").strip()
+        if not id_input.isdigit():
+            raise ValueError("ID має бути числом.")
+        id_val = int(id_input)
     if nb.delete(id_val):
         print(Fore.GREEN + f"Нотатку ID={id_val} видалено." + Style.RESET_ALL)
     else:
@@ -1071,10 +1136,13 @@ def delete_note(args: List[str], nb: Notebook, abook: AddressBook):
 
 @input_error
 def pin_note(args: List[str], nb: Notebook, abook: AddressBook):
-    if not args:
-        id_val = int(input("Note ID to pin: ").strip())
-    else:
+    if args:
         id_val = int(args[0])
+    else:
+        id_input = input("Введіть ID нотатки для закріплення: ").strip()
+        if not id_input.isdigit():
+            raise ValueError("ID має бути числом.")
+        id_val = int(id_input)
     note = nb.find_by_id(id_val)
     if "📌" not in note.tags:
         note.tags.append("📌")
@@ -1117,9 +1185,12 @@ def sort_notes_by_date(args: List[str], nb: Notebook, abook: AddressBook):
 @input_error
 def search_note_by_tag(args: List[str], nb: Notebook, abook: AddressBook = None):
     """search-tag <tag> — пошук нотаток за тегом."""
-    if not args:
-        raise ValueError("Використання: search-tag <tag>")
-    tag = args[0]
+    if args:
+        tag = args[0]
+    else:
+        tag = input("Введіть тег для пошуку (без #): ").strip()
+        if not tag:
+            raise ValueError("Тег не може бути порожнім.")
     results = nb.find_by_tag(tag)
     if not results:
         print(Fore.CYAN + f"Немає нотаток з тегом '{tag}'." + Style.RESET_ALL)
@@ -1143,10 +1214,16 @@ def search_note_by_tag(args: List[str], nb: Notebook, abook: AddressBook = None)
 
 @input_error
 def search_note_by_date(args: List[str], nb: Notebook, abook: AddressBook = None):
-    """search-date <YYYY-MM-DD> — пошук нотаток за датою створення."""
-    if not args:
-        raise ValueError("Використання: search-date <YYYY-MM-DD>")
-    date_str = args[0]
+    if args:
+        date_str = args[0]
+    else:
+        date_str = input("Введіть дату для пошуку (YYYY-MM-DD): ").strip()
+        if not date_str:
+            raise ValueError("Дата не може бути порожньою.")
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")  # Валідація формату
+    except ValueError:
+        raise ValueError("Невірний формат дати. Використовуйте YYYY-MM-DD.")
     results = nb.find_by_date(date_str)
     if not results:
         print(Fore.CYAN + f"Немає нотаток за датою {date_str}." + Style.RESET_ALL)
@@ -1213,9 +1290,12 @@ def list_tags(args: List[str], nb: Notebook):
 @input_error
 def delete_note_by_text(args: List[str], nb: Notebook, abook: AddressBook):
     """delete-note-text <query> — видаляє всі нотатки, що містять заданий текст."""
-    if not args:
-        raise ValueError("Використання: delete-note-text <query>")
-    query = " ".join(args).lower()
+    if args:
+        query = " ".join(args).lower()
+    else:
+        query = input("Введіть текст для пошуку та видалення: ").strip().lower()
+        if not query:
+            raise ValueError("Запит не може бути порожнім.")
     notes_to_delete = [note for note in nb.data.values() if query in note.text.lower()]
     if not notes_to_delete:
         print(Fore.CYAN + f"Нотаток із текстом '{query}' не знайдено." + Style.RESET_ALL)
@@ -1231,28 +1311,22 @@ def delete_note_by_text(args: List[str], nb: Notebook, abook: AddressBook):
 # Багаторівневий Completer
 # ------------------------------------------------------
 class MultiLevelCompleter(Completer):
-    """
-    Приклад мінімального багаторівневого автодоповнення:
-    - Якщо користувач набирає перше слово, пропонуємо список команд.
-    - Якщо вже набрали команду, пропонуємо певні ключі для аргументів.
-    """
-
-    def __init__(self, commands, subcommands_map):
+    def __init__(self, commands, subcommands_map, abook: AddressBook, nbook: Notebook):
         super().__init__()
-        self.commands = commands  # перелік основних команд
-        self.subcommands_map = subcommands_map  # dict{"edit-note": ["text=", "tags=", ...], ...}
+        self.commands = commands
+        self.subcommands_map = subcommands_map
+        self.abook = abook
+        self.nbook = nbook
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor.lstrip()
         tokens = text.split()
 
-        # Якщо нічого не введено - пропонуємо усі команди
         if len(tokens) == 0:
             for cmd in self.commands:
                 yield Completion(cmd, start_position=0)
             return
 
-        # Якщо введено 1 слово (можливо, частина команди)
         if len(tokens) == 1:
             partial_cmd = tokens[0].lower()
             for cmd in self.commands:
@@ -1260,15 +1334,51 @@ class MultiLevelCompleter(Completer):
                     yield Completion(cmd, start_position=-len(partial_cmd))
             return
 
-        # Якщо введено 2+ слова: перший токен — команда
         command = tokens[0].lower()
-        # Можемо підказувати аргументи
+        current_arg = tokens[-1].lower() if len(tokens) > 1 else ""
+
         if command in self.subcommands_map:
-            possible_args = self.subcommands_map[command]
-            current_arg = tokens[-1]
-            for arg in possible_args:
-                if arg.startswith(current_arg):
-                    yield Completion(arg, start_position=-len(current_arg))
+            if command in ["edit-note", "delete-note", "pin-note"]:
+                # Пропонуємо ID нотаток
+                ids = self.nbook.get_note_ids()
+                for id_str in ids:
+                    if current_arg in id_str:
+                        yield Completion(id_str, start_position=-len(current_arg))
+
+            elif command == "search-note":
+                # Пропонуємо теги та імена контактів
+                suggestions = []
+                suggestions.extend(self.nbook.get_unique_tags())
+                suggestions.extend(self.abook.get_contact_names())
+                for suggestion in suggestions:
+                    if current_arg in suggestion.lower():
+                        yield Completion(suggestion, start_position=-len(current_arg))
+
+            elif command == "search-date":
+                # Пропонуємо шаблон дати
+                date_template = "YYYY-MM-DD"
+                if date_template.lower().startswith(current_arg):
+                    yield Completion(date_template, start_position=-len(current_arg))
+
+            elif command == "search-tag":
+                # Пропонуємо теги
+                tags = self.nbook.get_unique_tags()
+                for tag in tags:
+                    if current_arg in tag.lower():
+                        yield Completion(tag, start_position=-len(current_arg))
+
+            elif command == "delete-note-text":
+                # Пропонуємо найпоширеніші слова з нотаток
+                words = self.nbook.get_common_words()
+                for word in words:
+                    if current_arg in word.lower():
+                        yield Completion(word, start_position=-len(current_arg))
+
+            else:
+                possible_args = self.subcommands_map[command]
+                for arg in possible_args:
+                    if current_arg in arg.lower():
+                        yield Completion(arg, start_position=-len(current_arg))
 
 # ------------------------------------------------------
 # Головна функція
@@ -1342,29 +1452,29 @@ def main():
 
     # Словник зі списком можливих "ключів" для автодоповнення другого рівня
     subcommands_map = {
-        "add-contact": ["name", "phones=", "emails=", "birthday="],
+        "add-contact": ["name=", "phones=", "emails=", "birthday="],
         "list-contacts": [],
-        "search-contact": [],
+        "search-contact": ["<query>"],
         "edit-contact": ["<id>", "phones=", "emails=", "birthday="],
         "delete-contact": ["<id>"],
-        "birthdays": ["days="],
+        "birthdays": ["days=7", "days=30"],
         "undo-contact": [],
         "add-note": ["<text>", "#tag"],
         "list-notes": [],
-        "search-note": [],
+        "search-note": ["<query>", "<tag>", "<contact_name>"],
         "edit-note": ["<id>", "text=", "tags=", "contact_ids="],
         "delete-note": ["<id>"],
         "sort-by-date": [],
         "search-tag": ["<tag>"],
         "search-date": ["YYYY-MM-DD"],
         "undo-note": [],
-        "list-tags": ["date", "desc"],
+        "list-tags": ["date", "desc", "<filter>"],
         "delete-note-text": ["<query>"],
         "pin-note": ["<id>"],
         "list-pinned": []
     }
 
-    custom_completer = MultiLevelCompleter(all_commands, subcommands_map)
+    custom_completer = MultiLevelCompleter(all_commands, subcommands_map, abook, nbook)
     session = PromptSession(">>> ", completer=custom_completer)
 
     print(Fore.GREEN + "Вітаю! Це ваш персональний помічник." + Style.RESET_ALL)
